@@ -1,6 +1,6 @@
 # GS2Pano
 
-> Convert 3D Gaussian Splatting scenes to 360° panoramas + per-pixel GS-ray pairing datasets for downstream training.
+> Fast convert 3D Gaussian Splatting scenes to 360° panoramas + per-pixel GS-ray pairing datasets for downstream training.
 
 <p align="center">
   <img src="assets/gs_scene.gif" width="70%"><br>
@@ -209,7 +209,7 @@ Phase 3: Frustum evaluation + pair collection (CUDA, ~0.15 s)
 
 ## Performance
 
-MipNerf360, 1024×512 Mercator, frustum method:
+MipNerf360, 1024×512 Mercator, frustum method, NVIDIA RTX 3090:
 
 | Scene | GS | Pairs | Vis. | Unique GS | Render | Total |
 |-------|-----|-------|------|-----------|--------|-------|
