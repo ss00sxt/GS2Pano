@@ -66,6 +66,40 @@ def upload_gaussians(means_np, scales_np, quats_np, opac_np, colors_np):
     return Ms, Qs, Ss, Os, Cs, vm, Kt
 
 
+def _build_tile_inputs(ug, vg, pr, D, W):
+    """Create tile-assignment tensors, including horizontal seam wrap copies."""
+    ug_list = [ug.astype(np.float32)]
+    vg_list = [vg.astype(np.float32)]
+    pr_list = [pr.astype(np.int32)]
+    D_list = [D.astype(np.float32)]
+    id_list = [np.arange(ug.shape[0], dtype=np.int32)]
+
+    needs_wrap = pr < W
+    left = needs_wrap & ((ug - pr) < 0)
+    if left.any():
+        ug_list.append((ug[left] + W).astype(np.float32))
+        vg_list.append(vg[left].astype(np.float32))
+        pr_list.append(pr[left].astype(np.int32))
+        D_list.append(D[left].astype(np.float32))
+        id_list.append(np.nonzero(left)[0].astype(np.int32))
+
+    right = needs_wrap & ((ug + pr) >= W)
+    if right.any():
+        ug_list.append((ug[right] - W).astype(np.float32))
+        vg_list.append(vg[right].astype(np.float32))
+        pr_list.append(pr[right].astype(np.int32))
+        D_list.append(D[right].astype(np.float32))
+        id_list.append(np.nonzero(right)[0].astype(np.int32))
+
+    return (
+        np.concatenate(ug_list),
+        np.concatenate(vg_list),
+        np.concatenate(pr_list),
+        np.concatenate(D_list),
+        np.concatenate(id_list),
+    )
+
+
 def render(means_np, scales_np, quats_np, opac_np, colors_np,
            cam_pos, R_c2w, H, W, gs_data, projection="equirect"):
     """Render a single equirectangular or Mercator panorama.
@@ -98,16 +132,20 @@ def render(means_np, scales_np, quats_np, opac_np, colors_np,
 
     # ---- Phase 3: tile assignment ----
     # Build CUDA tensors for gsplat's isect_tiles (expects [1, N, 2] etc.)
-    m2d = torch.zeros(1, N, 2, device="cuda")
-    m2d[0, :, 0] = torch.from_numpy(ug.astype(np.float32)).cuda()
-    m2d[0, :, 1] = torch.from_numpy(vg.astype(np.float32)).cuda()
-    rad = torch.zeros(1, N, 2, device="cuda", dtype=torch.int32)
-    rad[0, :, 0] = torch.from_numpy(pr).cuda()
-    rad[0, :, 1] = torch.from_numpy(pr).cuda()
-    dep = torch.from_numpy(D.astype(np.float32)).cuda().unsqueeze(0)
+    tile_ug, tile_vg, tile_pr, tile_D, tile_ids = _build_tile_inputs(ug, vg, pr, D, W)
+    tile_N = tile_ug.shape[0]
+    m2d = torch.zeros(1, tile_N, 2, device="cuda")
+    m2d[0, :, 0] = torch.from_numpy(tile_ug).cuda()
+    m2d[0, :, 1] = torch.from_numpy(tile_vg).cuda()
+    rad = torch.zeros(1, tile_N, 2, device="cuda", dtype=torch.int32)
+    rad[0, :, 0] = torch.from_numpy(tile_pr).cuda()
+    rad[0, :, 1] = torch.from_numpy(tile_pr).cuda()
+    dep = torch.from_numpy(tile_D).cuda().unsqueeze(0)
+    id_map = torch.from_numpy(tile_ids).cuda()
 
     # isect_tiles: assign each Gaussian to all tiles its pixel bbox overlaps
     _, ii, fid = isect_tiles(m2d, rad, dep, TS, tw, th, sort=True)
+    fid = id_map[fid]
     # isect_offset_encode: build per-tile index into flatten_ids
     iso = isect_offset_encode(ii, 1, tw, th).reshape(1, th, tw)
 
@@ -172,15 +210,19 @@ def render_with_pairs(means_np, scales_np, quats_np, opac_np, colors_np,
         ray_gpu_cache = None
 
     # ---- Phase 3: tile assignment (shared) ----
-    m2d = torch.zeros(1, N, 2, device="cuda")
-    m2d[0, :, 0] = torch.from_numpy(ug.astype(np.float32)).cuda()
-    m2d[0, :, 1] = torch.from_numpy(vg.astype(np.float32)).cuda()
-    rad = torch.zeros(1, N, 2, device="cuda", dtype=torch.int32)
-    rad[0, :, 0] = torch.from_numpy(pr).cuda()
-    rad[0, :, 1] = torch.from_numpy(pr).cuda()
-    dep = torch.from_numpy(D.astype(np.float32)).cuda().unsqueeze(0)
+    tile_ug, tile_vg, tile_pr, tile_D, tile_ids = _build_tile_inputs(ug, vg, pr, D, W)
+    tile_N = tile_ug.shape[0]
+    m2d = torch.zeros(1, tile_N, 2, device="cuda")
+    m2d[0, :, 0] = torch.from_numpy(tile_ug).cuda()
+    m2d[0, :, 1] = torch.from_numpy(tile_vg).cuda()
+    rad = torch.zeros(1, tile_N, 2, device="cuda", dtype=torch.int32)
+    rad[0, :, 0] = torch.from_numpy(tile_pr).cuda()
+    rad[0, :, 1] = torch.from_numpy(tile_pr).cuda()
+    dep = torch.from_numpy(tile_D).cuda().unsqueeze(0)
+    id_map = torch.from_numpy(tile_ids).cuda()
 
     _, ii, fid = isect_tiles(m2d, rad, dep, TS, tw, th, sort=True)
+    fid = id_map[fid]
     iso = isect_offset_encode(ii, 1, tw, th).reshape(1, th, tw)
 
     # ---- Phase 4: generate rays + CUDA rasterization (render) ----
