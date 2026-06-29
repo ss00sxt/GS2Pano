@@ -1,13 +1,17 @@
-"""Camera pose extraction from COLMAP binary and camera_params.json formats.
+"""Camera pose extraction from COLMAP binary and JSON camera formats.
 
 COLMAP convention (images.bin):
     X_cam = R_w2c * X_world + t          (world-to-camera)
     Camera center:   C = -R_w2c^T * t    (world space)
     Camera-to-world: R_c2w = R_w2c^T
 
-JSON convention (camera_params.json):
+JSON convention 1 (camera_params.json):
     Directly stores camera-to-world (c2w) 4x4 matrices.
     pos = c2w[:3, 3],  R_c2w = c2w[:3, :3]
+
+JSON convention 2 (MipNerf360 / DL3DV cameras.json):
+    Stores one dict per camera with `position`, `rotation`, and `img_name`.
+    `rotation` is interpreted as camera-to-world.
 """
 
 import json
@@ -95,10 +99,10 @@ def extract_colmap_poses(sparse_dir: str, camera_ids: list) -> dict:
 
 
 def extract_json_poses(json_path: str, camera_ids: list) -> dict:
-    """Extract world-space camera poses from camera_params.json.
+    """Extract world-space camera poses from supported JSON camera formats.
 
     Args:
-        json_path:  path to camera_params.json
+        json_path:  path to camera_params.json or cameras.json
         camera_ids: list of camera indices to extract
 
     Returns:
@@ -108,6 +112,18 @@ def extract_json_poses(json_path: str, camera_ids: list) -> dict:
         data = json.load(f)
 
     poses = {}
+    if isinstance(data, list):
+        for cid in camera_ids:
+            if cid < 0 or cid >= len(data):
+                print(f"  [WARN] camera {cid} not found in {json_path}, skipping")
+                continue
+            cam = data[cid]
+            pos = np.array(cam["position"], dtype=np.float32)
+            R_c2w = np.array(cam["rotation"], dtype=np.float32)
+            name = cam.get("img_name", f"cam_{cam.get('id', cid)}")
+            poses[cid] = {"pos": pos, "R_c2w": R_c2w, "name": name}
+        return poses
+
     for cid in camera_ids:
         for ext in data["extrinsics"]:
             if ext["camera_id"] == cid:
