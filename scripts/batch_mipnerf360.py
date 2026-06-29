@@ -11,6 +11,7 @@ from gsplat.cuda._wrapper import isect_offset_encode, isect_tiles, rasterize_to_
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from gs2pano.load.ply import load_ply
+from gs2pano.render.engine import _build_tile_inputs
 from gs2pano.render.projection import spherical_project
 from gs2pano.render.rays import generate_rays
 
@@ -73,14 +74,17 @@ for scene in SCENES:
     tw = math.ceil(W / TS); th = math.ceil(H / TS)
     ug, vg, pr, D = spherical_project(means, scales, cam_pos, R_c2w, W, H, PROJECTION)
 
-    m2d = torch.zeros(1, N, 2, device="cuda")
-    rad = torch.zeros(1, N, 2, device="cuda", dtype=torch.int32)
-    m2d[0,:,0]=torch.from_numpy(ug.astype(np.float32)).cuda()
-    m2d[0,:,1]=torch.from_numpy(vg.astype(np.float32)).cuda()
-    rad[0,:,0]=torch.from_numpy(pr).cuda()
-    rad[0,:,1]=torch.from_numpy(pr).cuda()
-    dep=torch.from_numpy(D.astype(np.float32)).cuda().unsqueeze(0)
+    tile_ug, tile_vg, tile_pr, tile_D, tile_ids = _build_tile_inputs(ug, vg, pr, D, W)
+    m2d = torch.zeros(1, len(tile_ug), 2, device="cuda")
+    rad = torch.zeros(1, len(tile_ug), 2, device="cuda", dtype=torch.int32)
+    m2d[0,:,0]=torch.from_numpy(tile_ug).cuda()
+    m2d[0,:,1]=torch.from_numpy(tile_vg).cuda()
+    rad[0,:,0]=torch.from_numpy(tile_pr).cuda()
+    rad[0,:,1]=torch.from_numpy(tile_pr).cuda()
+    dep=torch.from_numpy(tile_D).cuda().unsqueeze(0)
+    id_map = torch.from_numpy(tile_ids).cuda()
     _, ii, fid = isect_tiles(m2d, rad, dep, TS, tw, th, sort=True)
+    fid = id_map[fid]
     iso = isect_offset_encode(ii, 1, tw, th).reshape(1, th, tw)
 
     # ── Rays + frustum ──
