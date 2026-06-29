@@ -1,3 +1,4 @@
+[AGENTS.md](https://github.com/user-attachments/files/29449293/AGENTS.md)
 # GS2Pano
 
 > 3DGS 场景（.ply）→ 360° equirectangular 全景图 的数据准备工具。给下游「单张全景图 → 3DGS」前馈网络做训练数据。
@@ -262,6 +263,17 @@ GS2Pano/
 - **SH 系数维度**因 .ply 而异，HY_* 数据用 f_dc_* (0 阶)
 - **标准 pinhole 路径**（非 3DGUT）在从本地源码 build 时 `projection_ewa_3dgs_fused_fwd` 报错——不影响 3DGUT 路径，但也说明 main 分支 API 在迭代中
 
+### 脚本入口维护规则
+
+- README 中推荐的入口必须走统一的新渲染路径：
+  - `scripts/render_panorama.py`、`scripts/render_dl3dv_panos.py`：直接调用 `gs2pano.render.engine.render()`
+  - `scripts/render_pano.py`：也必须直接调用 `engine.render()`，不要再手写 projection/tile/rays/rasterize 流程
+  - `scripts/render_and_pair.py`、`scripts/batch_mipnerf360.py`：因为需要设置 pair buffer，可以保留底层 `rasterize_to_pixels_eval3d_extra()`，但 tile 输入必须复用 `gs2pano.render.engine._build_tile_inputs()`
+- 不要在脚本里重新实现旧版 `spherical_project() -> isect_tiles()` 直连路径。旧路径缺少高纬度横向半径补偿和 `u=0/W` 接缝 wrap，容易在全景图上下高纬区域产生明显的 16×16 tile 色块。
+- `gs2pano.load.poses.extract_json_poses()` 同时支持两种 JSON：
+  - list schema：MipNerf360 / DL3DV `cameras.json`，字段为 `position`、`rotation`、`img_name`
+  - dict schema：旧 `camera_params.json`，字段为 `extrinsics[].matrix`
+
 ### .ply 格式不统一
 
 - inria 标准 / gsplat 内部 / 其他变体字段名可能不同
@@ -466,7 +478,9 @@ CUDA_HOME=/usr/local/cuda-12.4 \
 
 ### 已知风险
 
-- **球面投影的像素半径**: 用 `3σ_max / D` 做保守估计，对于极近或极大的高斯（如 mkbgs 中 pixel radius 可达 126），会导致较多的 tile 交叉；可考虑在 Phase 4 kernel 中用更精确的 angular culling 替代
+- **球面投影的像素半径**: 已从旧的 `atan2(3σ_max, D)` 改为更保守的 `asin(3σ_max / D)`；若相机落入 3σ 范围内，角半径设为 `π`。这样可以避免近场高斯在脚下/极区被 tile 分配漏掉，但可能增加 tile 交叉数。
+- **高纬度 tile 分配**: equirectangular 图中同一球面角半径在高纬度会覆盖更宽的 `u` 范围，`r_u` 必须乘 `1/cos(φ)`。缺少该补偿会在上下高纬区域出现 16×16 tile 色块边界。
+- **全景水平接缝**: 跨 `u=0/W` 的高斯必须通过 `_build_tile_inputs()` 生成临时 wrap 副本，并把 `flatten_ids` 映射回原始 GS id。不要直接把原始 `ug/vg/pr/D` 传给 `isect_tiles()`。
 - **Python 射线生成慢**: 1024×512 需 ~10s 纯 Python 循环生成射线；后续应 vectorize 或移到 CUDA
 - **COLMAP 位姿约定**: `images.bin` 中 `q, t` 为标准 w2c（`X_cam = R·X_world + t`），相机中心 `C = -R^T·t`；部分非标准 pipeline 可能存 c2w，加载时需验证
 - **SH 系数**: 部分 .ply 含 `f_rest_*`（SH degree≥1），当前只用 `f_dc_*`（degree 0）计算颜色，忽略 view-dependent 效果
@@ -665,14 +679,16 @@ v = (φ + π/2) / π · H            ∈ [0, H]
 
 ```
 σ_max = max(s_x, s_y, s_z)                      最大物理尺度
-α     = atan2(3·σ_max, D)                        角半径 (conservative 3σ)
-r_u   = ⌈α / (2π) · W⌉ + 1                       像素半径
+α     = asin(3·σ_max / D), 若 3·σ_max ≥ D 则 α=π  保守角半径
+r_u   = ⌈α / (2π) · W · 1/cos(φ)⌉ + 1            高纬补偿后的横向像素半径
 r_v   = ⌈α / π · H⌉ + 1
 ```
 
 ### 7.4 Tile 分配条件
 
 GS 属于 tile `(t_u, t_v)` ⟺ 像素 bbox `[u-r_u, u+r_u] × [v-r_v, v+r_v]` 与 tile 区域 `[t_u·16, (t_u+1)·16) × [t_v·16, (t_v+1)·16)` 相交。
+
+若 bbox 跨越 `u=0/W` 接缝，`_build_tile_inputs()` 会为 tile 分配生成 `u+W` 或 `u-W` 临时副本；`flatten_ids` 随后映射回原始 GS id，避免渲染阶段读取错误高斯。
 
 ### 7.5 Per-ray 评估 (CUDA kernel)
 
