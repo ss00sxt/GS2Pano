@@ -53,9 +53,18 @@ def spherical_project(means_np, scales_np, cam_pos, R_c2w, W, H,
         v_scale = 1.0
 
     # --- Angular extent (3-sigma, conservative) ---
+    # At high latitudes, a fixed angular radius covers a wider azimuth span
+    # on the equirectangular image: ds^2 = dphi^2 + cos(phi)^2 dtheta^2.
+    # Without this factor, tile assignment under-covers the polar bands and
+    # produces visible 16x16 tile boundaries.
     sigma_max = np.max(scales_np, axis=1)
-    angular_r = np.arctan2(3.0 * sigma_max, D)
-    pix_r_u = np.clip(np.ceil(angular_r / (2 * np.pi) * W) + 1, 1, W)
+    sigma_3 = 3.0 * sigma_max
+    angular_r = np.empty_like(D, dtype=np.float32)
+    outside = sigma_3 < D
+    angular_r[outside] = np.arcsin(np.clip(sigma_3[outside] / D[outside], 0.0, 1.0))
+    angular_r[~outside] = np.pi
+    u_scale = 1.0 / np.clip(np.cos(phi_g), 1.0 / W, 1.0)
+    pix_r_u = np.clip(np.ceil(angular_r / (2 * np.pi) * W * u_scale) + 1, 1, W)
     pix_r_v = np.clip(np.ceil(angular_r / np.pi * H * v_scale) + 1, 1, H)
     pr = np.maximum(pix_r_u, pix_r_v).astype(np.int32)
 
